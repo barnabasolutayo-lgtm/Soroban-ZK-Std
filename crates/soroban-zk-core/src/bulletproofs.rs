@@ -17,7 +17,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::{elgamal::ElGamalCiphertext, Bn254, G1Affine, G1Projective};
+use crate::{Bn254, G1Affine, G1Projective};
 use ethnum::u256;
 
 /// Bit-length of the proven range. Values `v` must satisfy `0 <= v < 2^NBITS`.
@@ -30,8 +30,11 @@ const IP_ROUNDS: usize = 64usize.trailing_zeros() as usize;
 /// `2^64` — the exclusive upper bound of the proven range.
 pub const TWO64: u256 = u256::from_words(0u128, 0x10000000000000000u128);
 
-/// The BN254 G1 generator used as the value base `G`.
-const G_VALUE: G1Affine = ElGamalCiphertext::G;
+/// The BN254 G1 generator used as the value base `G` (x = 1, y = 2).
+const G_VALUE: G1Affine = G1Affine {
+    x: u256::from_words(0, 1),
+    y: u256::from_words(0, 2),
+};
 
 /// The identity/point-at-infinity in affine coordinates.
 const IDENTITY: G1Affine = G1Affine {
@@ -143,7 +146,7 @@ impl Transcript {
     /// Produce the next challenge scalar in `[0, r)`.
     fn challenge(&mut self) -> u256 {
         self.state = f_add(self.state, u256::from(1u8));
-        let c = self.state % Bn254::BASE_MODULUS;
+        let c = self.state % Bn254::FR_MODULUS;
         self.state = f_mul(self.state, FS_PRIME);
         c
     }
@@ -471,6 +474,7 @@ fn compute_p(
     mu: u256,
 ) -> G1Affine {
     let sum_g = sum_points(&gens.g);
+    let sum_h = sum_points(&gens.h);
 
     // Σ (2^i * h_tilde_i)
     let h_tilde = compute_h_tilde(&gens.h, y);
@@ -485,6 +489,7 @@ fn compute_p(
     p = add_scaled(p, s, x);
     p = add_scaled(p, &gens.h_blind, f_sub(t_hat, mu));
     p = add_scaled(p, &sum_g.to_affine(), f_sub(u256::from(0u8), z));
+    p = add_scaled(p, &sum_h.to_affine(), z);
     p = add_scaled(p, &sum_2_htilde.to_affine(), f_mul(z, z));
     p.to_affine()
 }
@@ -522,7 +527,7 @@ mod prover {
         buf[0..32].copy_from_slice(&seed.to_be_bytes());
         buf[32..36].copy_from_slice(&idx.to_be_bytes());
         buf[36..40].copy_from_slice(b"bpSc");
-        hash_to_fq(&buf) % Bn254::BASE_MODULUS
+        hash_to_fq(&buf) % Bn254::FR_MODULUS
     }
 
     /// Commit to `v` with blinding `gamma`: `V = v*G + gamma*H`.
@@ -551,7 +556,7 @@ mod prover {
             let bit = tv & u256::from(1u8);
             a_l[i] = bit;
             a_r[i] = if bit == u256::from(0u8) {
-                Bn254::BASE_MODULUS - u256::from(1u8)
+                Bn254::FR_MODULUS - u256::from(1u8)
             } else {
                 u256::from(0u8)
             };
@@ -744,7 +749,7 @@ pub fn verify_batch(gens: &Generators, proofs: &[RangeProof]) -> bool {
         let mut wb = [0u8; 36];
         wb[0..32].copy_from_slice(&base.to_be_bytes());
         wb[32..36].copy_from_slice(&(j as u32).to_be_bytes());
-        let rj = hash_to_fq(&wb) % Bn254::BASE_MODULUS;
+        let rj = hash_to_fq(&wb) % Bn254::FR_MODULUS;
 
         let res = compute_residual(gens, p);
         acc = add_scaled(acc, &res.to_affine(), rj);
@@ -786,8 +791,8 @@ mod tests {
         let mut a = [u256::from(0u8); N];
         let mut b = [u256::from(0u8); N];
         for i in 0..N {
-            a[i] = (u256::from(i as u64) + u256::from(1u8)) % Bn254::BASE_MODULUS;
-            b[i] = (u256::from((N - i) as u64) + u256::from(3u8)) % Bn254::BASE_MODULUS;
+            a[i] = (u256::from(i as u64) + u256::from(1u8)) % Bn254::FR_MODULUS;
+            b[i] = (u256::from((N - i) as u64) + u256::from(3u8)) % Bn254::FR_MODULUS;
         }
         // P = <a,g> + <b,h> + <a,b>*Q
         let mut p = msm(&g.g, &a);
@@ -853,7 +858,7 @@ mod tests {
         let g = gens();
         // A "negative" value mapped into the field as r - 1 is far above 2^64
         // and therefore not a valid 64-bit unsigned integer.
-        let neg_field = Bn254::BASE_MODULUS - u256::from(1u8);
+        let neg_field = Bn254::FR_MODULUS - u256::from(1u8);
         let res = prove(&g, neg_field, u256::from(1u8), u256::from(6u8));
         assert_eq!(res, Err(ZkError::InvalidInput));
     }
