@@ -986,13 +986,15 @@ impl Bn254 {
     pub fn add_fq(a: u256, b: u256) -> u256 {
         Self::add_mod(a, b, Self::FQ_MODULUS)
     }
+    /// Constant-time modular subtraction over the Fq modulus: `(a - b) mod FQ_MODULUS`.
+    ///
+    /// Uses `overflowing_sub` plus a branchless mask instead of a data-dependent
+    /// `if` so execution time does not vary with the operand values (timing
+    /// side-channel hardening).
     pub fn sub_fq(a: u256, b: u256) -> u256 {
         let (res, underflow) = a.overflowing_sub(b);
-        if underflow {
-            res.wrapping_add(Self::FQ_MODULUS)
-        } else {
-            res
-        }
+        let mask = u256::from(0u8).wrapping_sub(u256::from(underflow as u8));
+        res.wrapping_add(mask & Self::FQ_MODULUS)
     }
     pub fn invert_fq(a: u256) -> u256 {
         if a == 0 {
