@@ -10,11 +10,9 @@
 //! discrete logarithm between the commitment base `G`, the blinding base `H`
 //! and the vector generators `g`/`h` is known (soundness requirement).
 //!
-//! NOTE: The Fiat-Shamir transcript hash used here is a deterministic,
-//! dependency-free mixer suitable for reference/test deployments. Production
-//! deployments SHOULD replace [`Transcript`] with a vetted hash (e.g. Poseidon2
-//! or Keccak) to obtain a strong, unpredictable challenge oracle. The batch
-//! weight oracle (`verify_batch`) already uses SHA-256 for collision-resistant
+//! The Fiat-Shamir transcript uses a Poseidon2 sponge over BN254 Fr (t=3,
+//! d=5, rate=2) as the challenge oracle, compatible with CAP-0075. The batch
+//! weight oracle (`verify_batch`) uses SHA-256 for collision-resistant
 //! per-proof weight derivation.
 
 #![allow(clippy::needless_range_loop)]
@@ -120,38 +118,35 @@ fn neg_proj(p: G1Projective) -> G1Projective {
 }
 
 // ===========================================================================
-// Fiat-Shamir transcript
+// Fiat-Shamir transcript (Poseidon2 sponge)
 // ===========================================================================
 
-const FS_IV: u256 = u256::from_words(0x9e3779b97f4a7c15u128, 0xf39cc0605cedc834u128);
-const FS_PRIME: u256 = u256::from_words(0u128, 0x100000001b3u128);
+use crate::poseidon2;
 
-/// A minimal, deterministic Fiat-Shamir transcript. Replace with a vetted hash
-/// for production use.
+/// A Fiat-Shamir transcript backed by a Poseidon2 sponge over BN254 Fr.
 struct Transcript {
-    state: u256,
+    sponge: poseidon2::Poseidon2Sponge,
 }
 
 impl Transcript {
     fn new() -> Self {
-        Self { state: FS_IV }
+        Self {
+            sponge: poseidon2::Poseidon2Sponge::new(),
+        }
     }
 
+    #[allow(dead_code)]
     fn absorb_scalar(&mut self, s: u256) {
-        self.state = f_mul(self.state ^ s, FS_PRIME);
+        self.sponge.absorb(&[s]);
     }
 
     fn absorb_point(&mut self, p: &G1Affine) {
-        self.absorb_scalar(p.x);
-        self.absorb_scalar(p.y);
+        self.sponge.absorb(&[p.x, p.y]);
     }
 
     /// Produce the next challenge scalar in `[0, r)`.
     fn challenge(&mut self) -> u256 {
-        self.state = f_add(self.state, u256::from(1u8));
-        let c = self.state % Bn254::FR_MODULUS;
-        self.state = f_mul(self.state, FS_PRIME);
-        c
+        self.sponge.squeeze()
     }
 }
 
@@ -189,14 +184,9 @@ fn g1_from_x(x: u256) -> Option<G1Affine> {
     Some(G1Affine { x, y })
 }
 
-/// Deterministic hash of arbitrary bytes into `Fq`.
+/// Deterministic hash of arbitrary bytes into `Fq` using Poseidon2.
 fn hash_to_fq(bytes: &[u8]) -> u256 {
-    let mut h: u256 = 0xcbf29ce484222325u128.into();
-    for &b in bytes {
-        h ^= u256::from(b);
-        h = f_mul(h, FS_PRIME);
-    }
-    h % Bn254::FQ_MODULUS
+    poseidon2::hash_to_fq(bytes)
 }
 
 /// Try-and-increment hash-to-curve producing a fixed, sound G1 point.
@@ -540,7 +530,9 @@ mod prover {
     pub fn commit_value(gens: &Generators, v: u256, gamma: u256) -> G1Affine {
         let vg = G_VALUE.scalar_mul(v);
         let gh = gens.h_blind.scalar_mul(gamma);
-        G1Projective::from(vg).add(&G1Projective::from(gh)).to_affine()
+        G1Projective::from(vg)
+            .add(&G1Projective::from(gh))
+            .to_affine()
     }
 
     /// Produce a 64-bit range proof for `v`. Returns [`ZkError::InvalidInput`]
@@ -630,13 +622,21 @@ mod prover {
         );
         let t2 = inner_prod(&s_l, &base_rs);
 
-        let tau1 = derive_scalar(seed, 2 + 2 * N as u32 + 0);
-        let tau2 = derive_scalar(seed, 2 + 2 * N as u32 + 1);
+        let tau1 = derive_scalar(randomness, 2 + 2 * N as u32 + 0)?;
+        let tau2 = derive_scalar(randomness, 2 + 2 * N as u32 + 1)?;
 
-        let t1_pt = add_scaled(G1Projective::from(G_VALUE.scalar_mul(t1)), &gens.h_blind, tau1)
-            .to_affine();
-        let t2_pt = add_scaled(G1Projective::from(G_VALUE.scalar_mul(t2)), &gens.h_blind, tau2)
-            .to_affine();
+        let t1_pt = add_scaled(
+            G1Projective::from(G_VALUE.scalar_mul(t1)),
+            &gens.h_blind,
+            tau1,
+        )
+        .to_affine();
+        let t2_pt = add_scaled(
+            G1Projective::from(G_VALUE.scalar_mul(t2)),
+            &gens.h_blind,
+            tau2,
+        )
+        .to_affine();
 
         tr.absorb_point(&t1_pt);
         tr.absorb_point(&t2_pt);
@@ -650,10 +650,7 @@ mod prover {
         }
         let t_hat = inner_prod(&l_x, &r_x);
         let x2 = f_mul(x, x);
-        let taux = f_add(
-            f_add(f_mul(x2, tau2), f_mul(x, tau1)),
-            f_mul(z2, gamma),
-        );
+        let taux = f_add(f_add(f_mul(x2, tau2), f_mul(x, tau1)), f_mul(z2, gamma));
         let mu = f_add(alpha, f_mul(x, rho));
 
         let p = compute_p(gens, &a_pt, &s_pt, y, z, x, t_hat, mu);
