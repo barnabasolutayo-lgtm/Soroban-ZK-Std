@@ -44,13 +44,9 @@ pub mod elgamal {
         ///
         /// The caller MUST provide a fresh, uniformly random `ephemeral` for
         /// each encryption; reuse leaks the relationship between plaintexts.
-        pub fn encrypt(
-            amount: u256,
-            pub_key: &G1Affine,
-            ephemeral: u256,
-        ) -> Result<Self, ZkError> {
-            // Validate amount is in the scalar field
-            if amount >= Bn254::FR_MODULUS {
+        pub fn encrypt(amount: u256, pub_key: &G1Affine, ephemeral: u256) -> Result<Self, ZkError> {
+            // Validate amount and ephemeral scalar field bounds
+            if amount >= Bn254::FR_MODULUS || ephemeral >= Bn254::FR_MODULUS {
                 return Err(ZkError::InvalidFieldElement);
             }
 
@@ -78,6 +74,10 @@ pub mod elgamal {
         ///              = amount·G
         /// ```
         pub fn decrypt_amount_point(&self, private_key: u256) -> Result<G1Affine, ZkError> {
+            if private_key >= Bn254::FR_MODULUS {
+                return Err(ZkError::InvalidFieldElement);
+            }
+
             // shared = private_key * c1 = private_key * ephemeral * G
             let shared_secret = self.c1.scalar_mul(private_key);
 
@@ -108,12 +108,10 @@ pub mod elgamal {
             let ephemeral = u256::from(13u8);
             let pk = derive_pub_key(sk);
 
-            let ct = ElGamalCiphertext::encrypt(amount, &pk, ephemeral)
-                .expect("encrypt should succeed");
+            let ct =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
 
-            let decrypted_point = ct
-                .decrypt_amount_point(sk)
-                .expect("decrypt should succeed");
+            let decrypted_point = ct.decrypt_amount_point(sk).expect("decrypt should succeed");
 
             // decrypted_point should equal amount·G
             let expected = ElGamalCiphertext::G.scalar_mul(amount);
@@ -127,12 +125,10 @@ pub mod elgamal {
             let ephemeral = u256::from(3u8);
             let pk = derive_pub_key(sk);
 
-            let ct = ElGamalCiphertext::encrypt(amount, &pk, ephemeral)
-                .expect("encrypt should succeed");
+            let ct =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
 
-            let decrypted_point = ct
-                .decrypt_amount_point(sk)
-                .expect("decrypt should succeed");
+            let decrypted_point = ct.decrypt_amount_point(sk).expect("decrypt should succeed");
 
             // 0·G = point at infinity = (0, 0) in affine
             assert_eq!(decrypted_point.x, u256::from(0u8));
@@ -147,11 +143,9 @@ pub mod elgamal {
             let ephemeral = u256::from(98765u64);
             let pk = derive_pub_key(sk);
 
-            let ct = ElGamalCiphertext::encrypt(amount, &pk, ephemeral)
-                .expect("encrypt should succeed");
-            let decrypted_point = ct
-                .decrypt_amount_point(sk)
-                .expect("decrypt should succeed");
+            let ct =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
+            let decrypted_point = ct.decrypt_amount_point(sk).expect("decrypt should succeed");
 
             let expected = ElGamalCiphertext::G.scalar_mul(amount);
             assert_eq!(decrypted_point, expected);
@@ -216,8 +210,8 @@ pub mod elgamal {
             let ephemeral = u256::from(13u8);
             let pk = derive_pub_key(sk_correct);
 
-            let ct = ElGamalCiphertext::encrypt(amount, &pk, ephemeral)
-                .expect("encrypt should succeed");
+            let ct =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
 
             let decrypted_wrong = ct
                 .decrypt_amount_point(sk_wrong)
@@ -234,10 +228,10 @@ pub mod elgamal {
             let ephemeral = u256::from(31u8);
             let pk = derive_pub_key(sk);
 
-            let ct1 = ElGamalCiphertext::encrypt(amount, &pk, ephemeral)
-                .expect("encrypt should succeed");
-            let ct2 = ElGamalCiphertext::encrypt(amount, &pk, ephemeral)
-                .expect("encrypt should succeed");
+            let ct1 =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
+            let ct2 =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
 
             assert_eq!(ct1, ct2);
         }
@@ -250,15 +244,47 @@ pub mod elgamal {
             let ephemeral = u256::from(13u8);
             let pk = derive_pub_key(sk);
 
-            let ct = ElGamalCiphertext::encrypt(amount, &pk, ephemeral)
-                .expect("encrypt should succeed");
+            let ct =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
 
-            let decrypted_point = ct
-                .decrypt_amount_point(sk)
-                .expect("decrypt should succeed");
+            let decrypted_point = ct.decrypt_amount_point(sk).expect("decrypt should succeed");
 
             let expected = ElGamalCiphertext::G.scalar_mul(amount);
             assert_eq!(decrypted_point, expected);
+        }
+
+        #[test]
+        fn encrypt_rejects_ephemeral_above_modulus() {
+            let amount = u256::from(42u8);
+            let ephemeral = Bn254::FR_MODULUS;
+            let pk = derive_pub_key(u256::from(7u8));
+
+            let result = ElGamalCiphertext::encrypt(amount, &pk, ephemeral);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        fn encrypt_rejects_ephemeral_well_above_modulus() {
+            let amount = u256::from(42u8);
+            let ephemeral = Bn254::FR_MODULUS + u256::from(100u8);
+            let pk = derive_pub_key(u256::from(7u8));
+
+            let result = ElGamalCiphertext::encrypt(amount, &pk, ephemeral);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        fn decrypt_rejects_private_key_above_modulus() {
+            let amount = u256::from(42u8);
+            let sk_valid = u256::from(7u8);
+            let pk = derive_pub_key(sk_valid);
+            let ephemeral = u256::from(13u8);
+
+            let ct =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
+
+            let result = ct.decrypt_amount_point(Bn254::FR_MODULUS);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
         }
 
         #[test]
@@ -296,9 +322,7 @@ pub mod elgamal {
             assert_eq!(ct.c2, expected);
 
             // Decryption still works
-            let decrypted = ct
-                .decrypt_amount_point(sk)
-                .expect("decrypt should succeed");
+            let decrypted = ct.decrypt_amount_point(sk).expect("decrypt should succeed");
             assert_eq!(decrypted, expected);
         }
 
@@ -313,10 +337,8 @@ pub mod elgamal {
             let ephemeral_b = u256::from(11u8);
             let pk = derive_pub_key(sk);
 
-            let ct_a = ElGamalCiphertext::encrypt(a, &pk, ephemeral_a)
-                .expect("encrypt a");
-            let ct_b = ElGamalCiphertext::encrypt(b, &pk, ephemeral_b)
-                .expect("encrypt b");
+            let ct_a = ElGamalCiphertext::encrypt(a, &pk, ephemeral_a).expect("encrypt a");
+            let ct_b = ElGamalCiphertext::encrypt(b, &pk, ephemeral_b).expect("encrypt b");
 
             // Homomorphic addition: sum c1 and c2 components independently
             let sum_ct = ElGamalCiphertext {
@@ -324,9 +346,7 @@ pub mod elgamal {
                 c2: ct_a.c2.add(&ct_b.c2),
             };
 
-            let decrypted_sum = sum_ct
-                .decrypt_amount_point(sk)
-                .expect("decrypt sum");
+            let decrypted_sum = sum_ct.decrypt_amount_point(sk).expect("decrypt sum");
 
             let expected = ElGamalCiphertext::G.scalar_mul(a + b);
             assert_eq!(decrypted_sum, expected);
@@ -341,8 +361,7 @@ pub mod elgamal {
             let ephemeral = u256::from(13u8);
             let pk = derive_pub_key(sk);
 
-            let ct = ElGamalCiphertext::encrypt(a, &pk, ephemeral)
-                .expect("encrypt a");
+            let ct = ElGamalCiphertext::encrypt(a, &pk, ephemeral).expect("encrypt a");
 
             // Mixed addition: add b·G to c2 only
             // Dec(sk, (c1, c2 + b·G)) = a·G + b·G = (a+b)·G
@@ -351,9 +370,7 @@ pub mod elgamal {
                 c2: ct.c2.add(&ElGamalCiphertext::G.scalar_mul(b)),
             };
 
-            let decrypted = ct_plus_b
-                .decrypt_amount_point(sk)
-                .expect("decrypt");
+            let decrypted = ct_plus_b.decrypt_amount_point(sk).expect("decrypt");
 
             let expected = ElGamalCiphertext::G.scalar_mul(a + b);
             assert_eq!(decrypted, expected);
@@ -382,7 +399,7 @@ pub enum ZkError {
     /// A storage operation (read/write/remove) failed or required data was
     /// missing from the Soroban ledger.
     StorageError,
-     /// A zero-knowledge constraint or gadget invariant was violated by the
+    /// A zero-knowledge constraint or gadget invariant was violated by the
     /// supplied witness (e.g. a boolean gadget received a non-0/1 value).
     ConstraintUnsatisfied,
 }
@@ -764,10 +781,14 @@ impl Bn254 {
     /// parameter (where `u² = -1`). Previously this was incorrectly set to
     /// `3 + 19*u`, which rejected every valid G2 point.
     /// Stored as (real, imaginary). Used in the G2 curve equation: `y² = x³ + β`.
-    pub const G2_B_REAL: u256 =
-        u256::from_words(57263839228809413707999148736847571651u128, 241528894477357229398967524003378444517u128);
-    pub const G2_B_IMAG: u256 =
-        u256::from_words(784436153819307037095878749819829748u128, 222394522462485822084624302373924443602u128);
+    pub const G2_B_REAL: u256 = u256::from_words(
+        57263839228809413707999148736847571651u128,
+        241528894477357229398967524003378444517u128,
+    );
+    pub const G2_B_IMAG: u256 = u256::from_words(
+        784436153819307037095878749819829748u128,
+        222394522462485822084624302373924443602u128,
+    );
     pub const LEGENDRE_EXP_FR: ethnum::u256 = ethnum::u256::from_words(
         0x183227397098d014dc2822db40c0ac2e_u128,
         0x9419f4243cdcb848a1f0fac9f8000000_u128,
@@ -1066,20 +1087,14 @@ impl Bn254 {
     /// (a0 + a1*u) + (b0 + b1*u) = (a0 + b0) + (a1 + b1)*u
     #[inline(always)]
     pub fn fq2_add(a: (u256, u256), b: (u256, u256)) -> (u256, u256) {
-        (
-            Self::add_fq(a.0, b.0),
-            Self::add_fq(a.1, b.1),
-        )
+        (Self::add_fq(a.0, b.0), Self::add_fq(a.1, b.1))
     }
 
     /// Subtracts two Fq² elements.
     /// (a0 + a1*u) - (b0 + b1*u) = (a0 - b0) + (a1 - b1)*u
     #[inline(always)]
     pub fn fq2_sub(a: (u256, u256), b: (u256, u256)) -> (u256, u256) {
-        (
-            Self::sub_fq(a.0, b.0),
-            Self::sub_fq(a.1, b.1),
-        )
+        (Self::sub_fq(a.0, b.0), Self::sub_fq(a.1, b.1))
     }
 
     /// Negates an Fq² element.
@@ -1168,15 +1183,19 @@ impl Bn254 {
     /// is_in_correct_subgroup() is also required.
     pub fn is_on_curve(x: (u256, u256), y: (u256, u256)) -> bool {
         // Check for (0,0) - not a valid affine point
-        if x.0 == u256::from(0u8) && x.1 == u256::from(0u8)
-            && y.0 == u256::from(0u8) && y.1 == u256::from(0u8)
+        if x.0 == u256::from(0u8)
+            && x.1 == u256::from(0u8)
+            && y.0 == u256::from(0u8)
+            && y.1 == u256::from(0u8)
         {
             return false;
         }
 
         // Verify coordinates are in Fq
-        if !Self::is_valid_fq(x.0) || !Self::is_valid_fq(x.1)
-            || !Self::is_valid_fq(y.0) || !Self::is_valid_fq(y.1)
+        if !Self::is_valid_fq(x.0)
+            || !Self::is_valid_fq(x.1)
+            || !Self::is_valid_fq(y.0)
+            || !Self::is_valid_fq(y.1)
         {
             return false;
         }
@@ -1638,7 +1657,10 @@ mod tests {
         // Verify u² = -1: (0 + 1u) * (0 + 1u) = -1 + 0u
         let u = (u256::from(0u8), u256::from(1u8));
         let result = Bn254::fq2_mul(u, u);
-        let neg_one = (Bn254::sub_fq(u256::from(0u8), u256::from(1u8)), u256::from(0u8));
+        let neg_one = (
+            Bn254::sub_fq(u256::from(0u8), u256::from(1u8)),
+            u256::from(0u8),
+        );
         assert_eq!(result, neg_one);
     }
 
@@ -1647,7 +1669,10 @@ mod tests {
         // (2 + 3u)² = (4 - 9) + (2*2*3)*u = (-5 + 12u) = (Fq - 5, 12)
         let a = (u256::from(2u8), u256::from(3u8));
         let result = Bn254::fq2_sq(a);
-        let expected = (Bn254::sub_fq(u256::from(0u8), u256::from(5u8)), u256::from(12u8));
+        let expected = (
+            Bn254::sub_fq(u256::from(0u8), u256::from(5u8)),
+            u256::from(12u8),
+        );
         assert_eq!(result, expected);
     }
 
@@ -1656,7 +1681,10 @@ mod tests {
         // φ(a + b*u) = a - b*u
         let a = (u256::from(5u8), u256::from(7u8));
         let result = Bn254::fq2_frobenius(a);
-        let expected = (u256::from(5u8), Bn254::sub_fq(u256::from(0u8), u256::from(7u8)));
+        let expected = (
+            u256::from(5u8),
+            Bn254::sub_fq(u256::from(0u8), u256::from(7u8)),
+        );
         assert_eq!(result, expected);
     }
 
@@ -1735,22 +1763,10 @@ mod tests {
         let (x0, x1, y0, y1) = g2_generator();
         let out_of_field = Bn254::FQ_MODULUS;
 
-        assert!(!Bn254::is_on_curve(
-            (out_of_field, x1),
-            (y0, y1)
-        ));
-        assert!(!Bn254::is_on_curve(
-            (x0, out_of_field),
-            (y0, y1)
-        ));
-        assert!(!Bn254::is_on_curve(
-            (x0, x1),
-            (out_of_field, y1)
-        ));
-        assert!(!Bn254::is_on_curve(
-            (x0, x1),
-            (y0, out_of_field)
-        ));
+        assert!(!Bn254::is_on_curve((out_of_field, x1), (y0, y1)));
+        assert!(!Bn254::is_on_curve((x0, out_of_field), (y0, y1)));
+        assert!(!Bn254::is_on_curve((x0, x1), (out_of_field, y1)));
+        assert!(!Bn254::is_on_curve((x0, x1), (y0, out_of_field)));
     }
 
     /// Square root of an Fq² element `(a0, a1)` via `(x + y·u)² = (x² - y², 2xy)`.
