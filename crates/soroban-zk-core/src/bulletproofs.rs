@@ -13,12 +13,15 @@
 //! NOTE: The Fiat-Shamir transcript hash used here is a deterministic,
 //! dependency-free mixer suitable for reference/test deployments. Production
 //! deployments SHOULD replace [`Transcript`] with a vetted hash (e.g. Poseidon2
-//! or Keccak) to obtain a strong, unpredictable challenge oracle.
+//! or Keccak) to obtain a strong, unpredictable challenge oracle. The batch
+//! weight oracle (`verify_batch`) already uses SHA-256 for collision-resistant
+//! per-proof weight derivation.
 
 #![allow(clippy::needless_range_loop)]
 
 use crate::{Bn254, G1Affine, G1Projective};
 use ethnum::u256;
+use sha2::{Digest, Sha256};
 
 /// Bit-length of the proven range. Values `v` must satisfy `0 <= v < 2^NBITS`.
 pub const NBITS: usize = 64;
@@ -745,11 +748,15 @@ pub fn verify_batch(gens: &Generators, proofs: &[RangeProof]) -> bool {
 
     let mut acc = G1Projective::identity();
     for (j, p) in proofs.iter().enumerate() {
-        // Weight r_j = H(base || j) — unpredictable before all proofs fixed.
-        let mut wb = [0u8; 36];
-        wb[0..32].copy_from_slice(&base.to_be_bytes());
-        wb[32..36].copy_from_slice(&(j as u32).to_be_bytes());
-        let rj = hash_to_fq(&wb) % Bn254::FR_MODULUS;
+        // Weight r_j = SHA-256(base || j) — collision-resistant, unpredictable.
+        let mut hasher = Sha256::new();
+        hasher.update(&base.to_be_bytes());
+        hasher.update(&(j as u32).to_be_bytes());
+        let hash = hasher.finalize();
+        let rj = u256::from_words(
+            u128::from_be_bytes(hash[0..16].try_into().unwrap()),
+            u128::from_be_bytes(hash[16..32].try_into().unwrap()),
+        ) % Bn254::FR_MODULUS;
 
         let res = compute_residual(gens, p);
         acc = add_scaled(acc, &res.to_affine(), rj);
