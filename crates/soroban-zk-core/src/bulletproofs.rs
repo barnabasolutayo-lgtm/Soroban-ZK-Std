@@ -503,10 +503,9 @@ fn derive_challenges(proof: &RangeProof) -> (u256, u256, u256) {
     tr.absorb_point(&proof.s);
     let y = tr.challenge();
     let z = tr.challenge();
-    let mut tr2 = Transcript::new();
-    tr2.absorb_point(&proof.t1);
-    tr2.absorb_point(&proof.t2);
-    let x = tr2.challenge();
+    tr.absorb_point(&proof.t1);
+    tr.absorb_point(&proof.t2);
+    let x = tr.challenge();
     (y, z, x)
 }
 
@@ -632,10 +631,9 @@ mod prover {
         let t2_pt = add_scaled(G1Projective::from(G_VALUE.scalar_mul(t2)), &gens.h_blind, tau2)
             .to_affine();
 
-        let mut tr2 = Transcript::new();
-        tr2.absorb_point(&t1_pt);
-        tr2.absorb_point(&t2_pt);
-        let x = tr2.challenge();
+        tr.absorb_point(&t1_pt);
+        tr.absorb_point(&t2_pt);
+        let x = tr.challenge();
 
         let mut l_x = [u256::from(0u8); N];
         let mut r_x = [u256::from(0u8); N];
