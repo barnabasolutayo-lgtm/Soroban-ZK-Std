@@ -2391,6 +2391,7 @@ dependencies = [
  "kani",
  "num-traits",
  "proptest",
+ "sha2",
 ]
 
 [[package]]
