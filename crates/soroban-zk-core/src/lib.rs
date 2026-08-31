@@ -885,9 +885,6 @@ impl Bn254 {
     /// Efficiently computes `(value << shift) mod modulus` via repeated doubling.
     #[inline(always)]
     fn shift_left_mod(value: u256, shift: u32, modulus: u256) -> u256 {
-        if value == u256::from(0u8) {
-            return u256::from(0u8);
-        }
         let mut result = value % modulus;
         for _ in 0..shift {
             result = Self::add_mod(result, result, modulus);
