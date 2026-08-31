@@ -1232,6 +1232,13 @@ impl Bn254 {
     }
 
     pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective {
+        // Reduce the scalar into [0, r) before processing. Raw u256 values ≥ r
+        // are mathematically equivalent to their reduced form but cause the
+        // double-and-add loop (0..254) to silently skip high bits, producing a
+        // wrong result. The modular reduction makes the behaviour correct for
+        // all callers without requiring them to pre-reduce the input.
+        let scalar = scalar % Self::FR_MODULUS;
+
         if scalar == 0 {
             return G1Projective::identity();
         }
@@ -1262,6 +1269,11 @@ impl Bn254 {
     /// `a = 0` (the BN254 G2 curve is `y² = x³ + β`), so `β` does not enter the
     /// addition/doubling formulas.
     pub fn g2_scalar_mul(point: G2Projective, scalar: u256) -> G2Projective {
+        // Same guard as g1_scalar_mul: reduce into [0, r) so that callers
+        // passing raw u256 values ≥ r receive the mathematically correct result
+        // rather than a silently truncated one.
+        let scalar = scalar % Self::FR_MODULUS;
+
         if scalar == u256::from(0u8) {
             return G2Projective::identity();
         }
