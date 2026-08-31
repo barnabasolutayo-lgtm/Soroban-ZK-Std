@@ -11,12 +11,15 @@
 //! and the vector generators `g`/`h` is known (soundness requirement).
 //!
 //! The Fiat-Shamir transcript uses a Poseidon2 sponge over BN254 Fr (t=3,
-//! d=5, rate=2) as the challenge oracle, compatible with CAP-0075.
+//! d=5, rate=2) as the challenge oracle, compatible with CAP-0075. The batch
+//! weight oracle (`verify_batch`) uses SHA-256 for collision-resistant
+//! per-proof weight derivation.
 
 #![allow(clippy::needless_range_loop)]
 
 use crate::{Bn254, G1Affine, G1Projective};
 use ethnum::u256;
+use sha2::{Digest, Sha256};
 
 /// Bit-length of the proven range. Values `v` must satisfy `0 <= v < 2^NBITS`.
 pub const NBITS: usize = 64;
@@ -493,10 +496,9 @@ fn derive_challenges(proof: &RangeProof) -> (u256, u256, u256) {
     tr.absorb_point(&proof.s);
     let y = tr.challenge();
     let z = tr.challenge();
-    let mut tr2 = Transcript::new();
-    tr2.absorb_point(&proof.t1);
-    tr2.absorb_point(&proof.t2);
-    let x = tr2.challenge();
+    tr.absorb_point(&proof.t1);
+    tr.absorb_point(&proof.t2);
+    let x = tr.challenge();
     (y, z, x)
 }
 
@@ -509,15 +511,19 @@ mod prover {
     use super::*;
     use crate::ZkError;
 
-    /// Deterministic scalar stream from a seed (stand-in for a CSPRNG).
+    /// Deterministic scalar stream from a 64-byte CSPRNG sequence.
     /// Production deployments MUST use a real random source for blinding
     /// factors.
-    fn derive_scalar(seed: u256, idx: u32) -> u256 {
-        let mut buf = [0u8; 40];
-        buf[0..32].copy_from_slice(&seed.to_be_bytes());
-        buf[32..36].copy_from_slice(&idx.to_be_bytes());
-        buf[36..40].copy_from_slice(b"bpSc");
-        hash_to_fq(&buf) % Bn254::FR_MODULUS
+    fn derive_scalar(randomness: &[u8; 64], idx: u32) -> Result<u256, ZkError> {
+        let mut buf = [0u8; 72];
+        buf[0..64].copy_from_slice(randomness);
+        buf[64..68].copy_from_slice(&idx.to_be_bytes());
+        buf[68..72].copy_from_slice(b"bpSc");
+        let scalar = hash_to_fq(&buf) % Bn254::FR_MODULUS;
+        if scalar == u256::from(0u8) {
+            return Err(ZkError::InvalidInput);
+        }
+        Ok(scalar)
     }
 
     /// Commit to `v` with blinding `gamma`: `V = v*G + gamma*H`.
@@ -535,7 +541,7 @@ mod prover {
         gens: &Generators,
         v: u256,
         gamma: u256,
-        seed: u256,
+        randomness: &[u8; 64],
     ) -> Result<RangeProof, ZkError> {
         if v >= TWO64 {
             return Err(ZkError::InvalidInput);
@@ -555,13 +561,13 @@ mod prover {
             tv >>= 1;
         }
 
-        let alpha = derive_scalar(seed, 0);
-        let rho = derive_scalar(seed, 1);
+        let alpha = derive_scalar(randomness, 0)?;
+        let rho = derive_scalar(randomness, 1)?;
         let mut s_l = [u256::from(0u8); N];
         let mut s_r = [u256::from(0u8); N];
         for i in 0..N {
-            s_l[i] = derive_scalar(seed, 2 + i as u32);
-            s_r[i] = derive_scalar(seed, 2 + N as u32 + i as u32);
+            s_l[i] = derive_scalar(randomness, 2 + i as u32)?;
+            s_r[i] = derive_scalar(randomness, 2 + N as u32 + i as u32)?;
         }
 
         let a_pt = {
@@ -616,8 +622,8 @@ mod prover {
         );
         let t2 = inner_prod(&s_l, &base_rs);
 
-        let tau1 = derive_scalar(seed, 2 + 2 * N as u32 + 0);
-        let tau2 = derive_scalar(seed, 2 + 2 * N as u32 + 1);
+        let tau1 = derive_scalar(randomness, 2 + 2 * N as u32 + 0)?;
+        let tau2 = derive_scalar(randomness, 2 + 2 * N as u32 + 1)?;
 
         let t1_pt = add_scaled(
             G1Projective::from(G_VALUE.scalar_mul(t1)),
@@ -632,10 +638,9 @@ mod prover {
         )
         .to_affine();
 
-        let mut tr2 = Transcript::new();
-        tr2.absorb_point(&t1_pt);
-        tr2.absorb_point(&t2_pt);
-        let x = tr2.challenge();
+        tr.absorb_point(&t1_pt);
+        tr.absorb_point(&t2_pt);
+        let x = tr.challenge();
 
         let mut l_x = [u256::from(0u8); N];
         let mut r_x = [u256::from(0u8); N];
@@ -742,11 +747,15 @@ pub fn verify_batch(gens: &Generators, proofs: &[RangeProof]) -> bool {
 
     let mut acc = G1Projective::identity();
     for (j, p) in proofs.iter().enumerate() {
-        // Weight r_j = H(base || j) — unpredictable before all proofs fixed.
-        let mut wb = [0u8; 36];
-        wb[0..32].copy_from_slice(&base.to_be_bytes());
-        wb[32..36].copy_from_slice(&(j as u32).to_be_bytes());
-        let rj = hash_to_fq(&wb) % Bn254::FR_MODULUS;
+        // Weight r_j = SHA-256(base || j) — collision-resistant, unpredictable.
+        let mut hasher = Sha256::new();
+        hasher.update(&base.to_be_bytes());
+        hasher.update(&(j as u32).to_be_bytes());
+        let hash = hasher.finalize();
+        let rj = u256::from_words(
+            u128::from_be_bytes(hash[0..16].try_into().unwrap()),
+            u128::from_be_bytes(hash[16..32].try_into().unwrap()),
+        ) % Bn254::FR_MODULUS;
 
         let res = compute_residual(gens, p);
         acc = add_scaled(acc, &res.to_affine(), rj);
@@ -818,7 +827,7 @@ mod tests {
     #[test]
     fn range_proof_zero_valid() {
         let g = gens();
-        let proof = prove(&g, u256::from(0u8), u256::from(777u32), u256::from(1u8)).unwrap();
+        let proof = prove(&g, u256::from(0u8), u256::from(777u32), &[1u8; 64]).unwrap();
         assert!(verify(&g, &proof));
     }
 
@@ -826,7 +835,7 @@ mod tests {
     fn range_proof_max_valid() {
         let g = gens();
         let max = TWO64 - u256::from(1u8);
-        let proof = prove(&g, max, u256::from(12345u32), u256::from(2u8)).unwrap();
+        let proof = prove(&g, max, u256::from(12345u32), &[2u8; 64]).unwrap();
         assert!(verify(&g, &proof));
     }
 
@@ -834,7 +843,7 @@ mod tests {
     fn range_proof_mid_value_valid() {
         let g = gens();
         let v = u256::from(0xdeadbeefcafeu128);
-        let proof = prove(&g, v, u256::from(99u32), u256::from(3u8)).unwrap();
+        let proof = prove(&g, v, u256::from(99u32), &[3u8; 64]).unwrap();
         assert!(verify(&g, &proof));
     }
 
@@ -842,11 +851,11 @@ mod tests {
     fn range_proof_overflow_rejected() {
         let g = gens();
         // Exactly 2^64 is out of the 64-bit range.
-        let res = prove(&g, TWO64, u256::from(1u8), u256::from(4u8));
+        let res = prove(&g, TWO64, u256::from(1u8), &[4u8; 64]);
         assert_eq!(res, Err(ZkError::InvalidInput));
         // A value well above 2^64 (modular representation) is also rejected.
         let above = TWO64 + u256::from(0x1234u16);
-        let res2 = prove(&g, above, u256::from(1u8), u256::from(5u8));
+        let res2 = prove(&g, above, u256::from(1u8), &[5u8; 64]);
         assert_eq!(res2, Err(ZkError::InvalidInput));
     }
 
@@ -856,14 +865,14 @@ mod tests {
         // A "negative" value mapped into the field as r - 1 is far above 2^64
         // and therefore not a valid 64-bit unsigned integer.
         let neg_field = Bn254::FR_MODULUS - u256::from(1u8);
-        let res = prove(&g, neg_field, u256::from(1u8), u256::from(6u8));
+        let res = prove(&g, neg_field, u256::from(1u8), &[6u8; 64]);
         assert_eq!(res, Err(ZkError::InvalidInput));
     }
 
     #[test]
     fn range_proof_tampered_fails() {
         let g = gens();
-        let mut proof = prove(&g, u256::from(42u8), u256::from(7u8), u256::from(8u8)).unwrap();
+        let mut proof = prove(&g, u256::from(42u8), u256::from(7u8), &[8u8; 64]).unwrap();
         // Flip the claimed inner product.
         proof.t_hat = f_add(proof.t_hat, u256::from(1u8));
         assert!(!verify(&g, &proof));
@@ -872,7 +881,7 @@ mod tests {
     #[test]
     fn range_proof_wrong_commitment_fails() {
         let g = gens();
-        let mut proof = prove(&g, u256::from(42u8), u256::from(7u8), u256::from(9u8)).unwrap();
+        let mut proof = prove(&g, u256::from(42u8), u256::from(7u8), &[9u8; 64]).unwrap();
         // Swap to a different valid-looking commitment (should not verify).
         proof.v = commit_value(&g, u256::from(43u8), u256::from(7u8));
         assert!(!verify(&g, &proof));
@@ -882,21 +891,9 @@ mod tests {
     fn batch_all_valid() {
         let g = gens();
         let proofs = [
-            prove(&g, u256::from(0u8), u256::from(1u8), u256::from(11u8)).unwrap(),
-            prove(
-                &g,
-                TWO64 - u256::from(1u8),
-                u256::from(2u8),
-                u256::from(12u8),
-            )
-            .unwrap(),
-            prove(
-                &g,
-                u256::from(0xabcdu128),
-                u256::from(3u8),
-                u256::from(13u8),
-            )
-            .unwrap(),
+            prove(&g, u256::from(0u8), u256::from(1u8), &[11u8; 64]).unwrap(),
+            prove(&g, TWO64 - u256::from(1u8), u256::from(2u8), &[12u8; 64]).unwrap(),
+            prove(&g, u256::from(0xabcdu128), u256::from(3u8), &[13u8; 64]).unwrap(),
         ];
         assert!(verify_batch(&g, &proofs));
     }
@@ -904,8 +901,8 @@ mod tests {
     #[test]
     fn batch_with_invalid_fails() {
         let g = gens();
-        let mut good = prove(&g, u256::from(5u8), u256::from(1u8), u256::from(14u8)).unwrap();
-        let bad = prove(&g, u256::from(6u8), u256::from(1u8), u256::from(15u8)).unwrap();
+        let mut good = prove(&g, u256::from(5u8), u256::from(1u8), &[14u8; 64]).unwrap();
+        let bad = prove(&g, u256::from(6u8), u256::from(1u8), &[15u8; 64]).unwrap();
         good.t_hat = f_add(good.t_hat, u256::from(1u8));
         let proofs = [good, bad];
         assert!(!verify_batch(&g, &proofs));
